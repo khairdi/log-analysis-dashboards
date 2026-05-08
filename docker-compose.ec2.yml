@@ -1,0 +1,14 @@
+services:
+  dashboard:
+    restart: unless-stopped
+    ports:
+      - "80:3000"
+    environment:
+      - AWS_REGION=${AWS_REGION:-ap-southeast-1}
+      - CACHE_DIR=/cache
+    volumes:
+      - cf-cache:/cache
+    # No ~/.aws mount — credentials come from the EC2 IAM instance role
+
+volumes:
+  cf-cache:

@@ -1,0 +1,22 @@
+services:
+  dashboard:
+    build: .
+    ports:
+      - "8192:3000"
+    environment:
+      # Pass AWS credentials from the host shell if exported, otherwise
+      # the SDK falls through to the ~/.aws volume mount below.
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_SESSION_TOKEN
+      - AWS_REGION=${AWS_REGION:-ap-southeast-1}
+      - CACHE_DIR=/cache
+    volumes:
+      # Persist the S3 log cache across container restarts
+      - cf-cache:/cache
+      # Mount host ~/.aws so the SDK can read credentials/config/SSO tokens
+      - ~/.aws:/root/.aws:ro
+      - ~/.aws:/home/node/.aws:ro
+
+volumes:
+  cf-cache:
