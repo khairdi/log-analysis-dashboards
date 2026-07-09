@@ -1,6 +1,7 @@
 import express from 'express'
 import cors from 'cors'
 import { S3Client, ListObjectsV2Command, GetObjectCommand, GetBucketLocationCommand } from '@aws-sdk/client-s3'
+import { fromIni } from '@aws-sdk/credential-providers'
 import { gunzipSync } from 'zlib'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
@@ -65,6 +66,37 @@ function getRefererHost(referer: string): string {
 
 function inc(m: Map<string, number>, k: string): void {
   m.set(k, (m.get(k) ?? 0) + 1)
+}
+
+// CloudFront standard logs come in two shapes: legacy tab-delimited W3C
+// (with a "#Fields:" header naming each column) or newer JSON-per-line
+// (same field names, but as JSON object keys). Format is fixed for a given
+// distribution, so we detect it once from the first content line and reuse
+// that decision for the rest of the file.
+type CfLineState = { fieldIndex: Record<string, number>; jsonMode: boolean | null }
+function newCfLineState(): CfLineState {
+  return { fieldIndex: {}, jsonMode: null }
+}
+/** Returns a field accessor for a data row, or null if `line` is a header/comment/unparseable row. */
+function cfLineGetter(line: string, state: CfLineState): ((name: string) => string) | null {
+  if (state.jsonMode === null) {
+    if (line.startsWith('#Fields:')) {
+      line.slice('#Fields:'.length).trim().split('\t').forEach((f, i) => { state.fieldIndex[f] = i })
+      state.jsonMode = false
+      return null
+    }
+    if (line.startsWith('#')) return null
+    if (line.startsWith('{')) state.jsonMode = true
+    else return null
+  }
+  if (line.startsWith('#')) return null
+  if (state.jsonMode) {
+    let obj: Record<string, unknown>
+    try { obj = JSON.parse(line) } catch { return null }
+    return (name: string) => { const v = obj[name]; return v == null ? '-' : String(v) }
+  }
+  const vals = line.split('\t')
+  return (name: string) => vals[state.fieldIndex[name]] ?? '-'
 }
 
 /** Returns true when a single string value satisfies the filter. */
@@ -184,8 +216,7 @@ function computeFromFilePaths(
   // Time series
   const timeBuckets = new Map<number, Map<string, number>>()
 
-  let fieldIndex: Record<string, number> = {}
-  let fieldsFound = false
+  const cfState = newCfLineState()
 
   for (const filePath of filePaths) {
     if (!existsSync(filePath)) {
@@ -200,16 +231,8 @@ function computeFromFilePaths(
       const line = rawLine.trim()
       if (!line) continue
 
-      if (line.startsWith('#Fields:') && !fieldsFound) {
-        const fields = line.slice('#Fields:'.length).trim().split('\t')
-        fields.forEach((f, i) => { fieldIndex[f] = i })
-        fieldsFound = true
-        continue
-      }
-      if (line.startsWith('#') || !fieldsFound) continue
-
-      const vals = line.split('\t')
-      const get = (name: string) => vals[fieldIndex[name]] ?? '-'
+      const get = cfLineGetter(line, cfState)
+      if (!get) continue
 
       const date = get('date')
       const time = get('time')
@@ -626,28 +649,52 @@ const app = express()
 app.use(cors())
 app.use(express.json())
 
-// One S3 client per region, keyed by region string.
-const s3Clients = new Map<string, S3Client>()
-function s3ForRegion(region: string): S3Client {
-  if (!s3Clients.has(region)) s3Clients.set(region, new S3Client({ region }))
-  return s3Clients.get(region)!
-}
-
-// Cache bucket → region so we only call GetBucketLocation once per bucket.
-const bucketRegionCache = new Map<string, string>()
-async function s3ForBucket(bucket: string): Promise<S3Client> {
-  if (!bucketRegionCache.has(bucket)) {
-    try {
-      // GetBucketLocation requires us-east-1 as the initial region.
-      const probe = s3ForRegion('us-east-1')
-      const { LocationConstraint } = await probe.send(new GetBucketLocationCommand({ Bucket: bucket }))
-      bucketRegionCache.set(bucket, LocationConstraint ?? 'us-east-1')
-    } catch {
-      // Fall back to explicitly configured region or ap-southeast-1.
-      bucketRegionCache.set(bucket, process.env.AWS_REGION ?? 'ap-southeast-1')
+// Named profiles from ~/.aws/credentials and ~/.aws/config (section names only — never read secret values here).
+function listAwsProfiles(): string[] {
+  const profiles = new Set<string>(['default'])
+  for (const file of [join(homedir(), '.aws', 'credentials'), join(homedir(), '.aws', 'config')]) {
+    if (!existsSync(file)) continue
+    const isConfigFile = file.endsWith('config')
+    for (const line of readFileSync(file, 'utf-8').split('\n')) {
+      const match = line.match(/^\s*\[\s*(.+?)\s*\]\s*$/)
+      if (!match) continue
+      const name = isConfigFile ? match[1].replace(/^profile\s+/, '') : match[1]
+      profiles.add(name)
     }
   }
-  return s3ForRegion(bucketRegionCache.get(bucket)!)
+  return Array.from(profiles).sort()
+}
+
+// One S3 client per (profile, region) pair.
+const s3Clients = new Map<string, S3Client>()
+function s3ForRegion(region: string, profile?: string): S3Client {
+  const key = `${profile ?? ''}::${region}`
+  if (!s3Clients.has(key)) {
+    s3Clients.set(key, new S3Client({
+      region,
+      ...(profile ? { credentials: fromIni({ profile }) } : {}),
+    }))
+  }
+  return s3Clients.get(key)!
+}
+
+// Cache bucket → region so we only call GetBucketLocation once per (profile, bucket).
+const bucketRegionCache = new Map<string, string>()
+async function s3ForBucket(bucket: string, profile?: string): Promise<S3Client> {
+  const cacheKey = `${profile ?? ''}::${bucket}`
+  if (!bucketRegionCache.has(cacheKey)) {
+    try {
+      // GetBucketLocation requires us-east-1 as the initial region.
+      const probe = s3ForRegion('us-east-1', profile)
+      const { LocationConstraint } = await probe.send(new GetBucketLocationCommand({ Bucket: bucket }))
+      // AWS returns an empty string (not "us-east-1") for buckets in us-east-1.
+      bucketRegionCache.set(cacheKey, LocationConstraint || 'us-east-1')
+    } catch {
+      // Fall back to explicitly configured region or ap-southeast-1.
+      bucketRegionCache.set(cacheKey, process.env.AWS_REGION ?? 'ap-southeast-1')
+    }
+  }
+  return s3ForRegion(bucketRegionCache.get(cacheKey)!, profile)
 }
 
 interface S3Uri { bucket: string; prefix: string }
@@ -659,12 +706,24 @@ function parseS3Uri(uri: string): S3Uri {
   return { bucket: cleaned.slice(0, slash), prefix: cleaned.slice(slash + 1) }
 }
 
-async function listCommonPrefixes(bucket: string, prefix: string): Promise<string[]> {
-  const client = await s3ForBucket(bucket)
+async function listCommonPrefixes(bucket: string, prefix: string, profile?: string): Promise<string[]> {
+  const client = await s3ForBucket(bucket, profile)
   const cmd = new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, Delimiter: '/' })
   const result = await client.send(cmd)
   return (result.CommonPrefixes ?? []).map(p => p.Prefix!.slice(prefix.length).replace(/\/$/, ''))
 }
+
+/**
+ * GET /api/aws/profiles
+ * Returns named profile IDs from ~/.aws/credentials and ~/.aws/config (never secret values).
+ */
+app.get('/api/aws/profiles', (_req, res) => {
+  try {
+    res.json({ profiles: listAwsProfiles() })
+  } catch (err: unknown) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
 
 /**
  * GET /api/s3/dates?uri=s3://bucket/prefix/
@@ -672,6 +731,7 @@ async function listCommonPrefixes(bucket: string, prefix: string): Promise<strin
  */
 app.get('/api/s3/dates', async (req, res) => {
   const uri = req.query.uri as string
+  const profile = (req.query.profile as string) || undefined
   if (!uri) return res.status(400).json({ error: 'Missing ?uri parameter' })
 
   const { bucket, prefix: rawPrefix } = parseS3Uri(uri)
@@ -680,7 +740,7 @@ app.get('/api/s3/dates', async (req, res) => {
   const prefix = rawPrefix.replace(/\d{4}\/\d{2}\/\d{2}(\/\d{2})*(\/\d{2})*\/?$/, '')
 
   try {
-    const topFolders = await listCommonPrefixes(bucket, prefix)
+    const topFolders = await listCommonPrefixes(bucket, prefix, profile)
 
     // Strategy 1: hierarchical year/month/day
     const yearFolders = topFolders.filter(f => /^\d{4}$/.test(f))
@@ -688,10 +748,10 @@ app.get('/api/s3/dates', async (req, res) => {
       const dates: string[] = []
       for (const year of yearFolders) {
         const yearPrefix = `${prefix}${year}/`
-        const months = (await listCommonPrefixes(bucket, yearPrefix)).filter(m => /^\d{2}$/.test(m))
+        const months = (await listCommonPrefixes(bucket, yearPrefix, profile)).filter(m => /^\d{2}$/.test(m))
         for (const month of months) {
           const monthPrefix = `${yearPrefix}${month}/`
-          const days = (await listCommonPrefixes(bucket, monthPrefix)).filter(d => /^\d{2}$/.test(d))
+          const days = (await listCommonPrefixes(bucket, monthPrefix, profile)).filter(d => /^\d{2}$/.test(d))
           for (const day of days) dates.push(`${year}-${month}-${day}`)
         }
       }
@@ -705,7 +765,7 @@ app.get('/api/s3/dates', async (req, res) => {
       return res.json({ bucket, prefix, mode: 'folders', dates: dateFolders.sort().reverse() })
 
     // Strategy 3: flat files, extract date from filename
-    const allResult = await (await s3ForBucket(bucket)).send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix }))
+    const allResult = await (await s3ForBucket(bucket, profile)).send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix }))
     const dateSet = new Set<string>()
     for (const obj of allResult.Contents ?? []) {
       const match = obj.Key!.match(/(\d{4}-\d{2}-\d{2})/)
@@ -725,12 +785,12 @@ app.get('/api/s3/dates', async (req, res) => {
  * Used by the WAF picker to add hour-level selection for year/month/day/hour/minute paths.
  */
 app.get('/api/s3/hours', async (req, res) => {
-  const { bucket, prefix, date } = req.query as Record<string, string>
+  const { bucket, prefix, date, profile } = req.query as Record<string, string>
   if (!bucket || !date) return res.status(400).json({ error: 'Missing required parameters' })
   const [year, month, day] = date.split('-')
   const dayPrefix = `${prefix ?? ''}${year}/${month}/${day}/`
   try {
-    const hours = (await listCommonPrefixes(bucket, dayPrefix))
+    const hours = (await listCommonPrefixes(bucket, dayPrefix, profile || undefined))
       .filter(h => /^\d{2}$/.test(h))
       .sort()
       .reverse()
@@ -745,7 +805,7 @@ app.get('/api/s3/hours', async (req, res) => {
  * Optional ?hour=HH narrows hierarchical mode to a single hour subfolder (WAF logs).
  */
 app.get('/api/s3/files', async (req, res) => {
-  const { bucket, prefix, date, mode, hour } = req.query as Record<string, string>
+  const { bucket, prefix, date, mode, hour, profile } = req.query as Record<string, string>
   if (!bucket || !date) return res.status(400).json({ error: 'Missing required parameters' })
 
   let listPrefix: string
@@ -761,7 +821,7 @@ app.get('/api/s3/files', async (req, res) => {
   }
 
   try {
-    const s3 = await s3ForBucket(bucket)
+    const s3 = await s3ForBucket(bucket, profile || undefined)
     let allObjects: Array<{ key: string; size: number; lastModified: Date | undefined; cached: boolean }> = []
     let continuationToken: string | undefined
 
@@ -796,12 +856,12 @@ app.get('/api/s3/files', async (req, res) => {
  * No LogRow[] array is ever stored in memory.
  */
 app.post('/api/sessions/s3', async (req, res) => {
-  const { bucket, keys } = req.body as { bucket: string; keys: string[] }
+  const { bucket, keys, profile } = req.body as { bucket: string; keys: string[]; profile?: string }
   if (!bucket || !Array.isArray(keys) || keys.length === 0)
     return res.status(400).json({ error: 'Missing bucket or keys array' })
 
   try {
-    const s3 = await s3ForBucket(bucket)
+    const s3 = await s3ForBucket(bucket, profile)
     let hits = 0, misses = 0
     const filePaths: string[] = []
 
@@ -955,12 +1015,12 @@ app.post('/api/sessions/:id/query', (req, res) => {
  * Body: { bucket: string, keys: string[] }
  */
 app.post('/api/waf-sessions/s3', async (req, res) => {
-  const { bucket, keys } = req.body as { bucket: string; keys: string[] }
+  const { bucket, keys, profile } = req.body as { bucket: string; keys: string[]; profile?: string }
   if (!bucket || !Array.isArray(keys) || keys.length === 0)
     return res.status(400).json({ error: 'Missing bucket or keys array' })
 
   try {
-    const s3 = await s3ForBucket(bucket)
+    const s3 = await s3ForBucket(bucket, profile)
     let hits = 0, misses = 0
     const filePaths: string[] = []
 
@@ -1070,8 +1130,7 @@ function fetchCfRows(
   const minTs = dateRangeStart ? dateRangeStart.getTime() : -Infinity
   const maxTs = dateRangeEnd   ? dateRangeEnd.getTime()   : Infinity
 
-  let fieldIndex: Record<string, number> = {}
-  let fieldsFound = false
+  const cfState = newCfLineState()
   const allRows: CfLogRow[] = []
 
   for (const filePath of filePaths) {
@@ -1081,16 +1140,8 @@ function fetchCfRows(
       const line = rawLine.trim()
       if (!line) continue
 
-      if (line.startsWith('#Fields:') && !fieldsFound) {
-        const fields = line.slice('#Fields:'.length).trim().split('\t')
-        fields.forEach((f, i) => { fieldIndex[f] = i })
-        fieldsFound = true
-        continue
-      }
-      if (line.startsWith('#') || !fieldsFound) continue
-
-      const vals = line.split('\t')
-      const get = (name: string) => vals[fieldIndex[name]] ?? '-'
+      const get = cfLineGetter(line, cfState)
+      if (!get) continue
 
       const date = get('date'), time = get('time')
       if (!date || date === '-' || !time || time === '-') continue

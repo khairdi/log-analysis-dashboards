@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { TIME_RANGE_OPTIONS } from '../lib/metrics'
 import type { TimeRange } from '../lib/metrics'
 import type { SessionData } from '../types'
@@ -54,6 +54,8 @@ function formatSize(bytes: number): string {
 
 export default function S3Picker({ onSession }: Props) {
   const [uri, setUri] = useState('')
+  const [profiles, setProfiles] = useState<string[]>([])
+  const [profile, setProfile] = useState('default')
   const [browseError, setBrowseError] = useState('')
   const [browsing, setBrowsing] = useState(false)
   const [dateInfo, setDateInfo] = useState<DateInfo | null>(null)
@@ -68,6 +70,15 @@ export default function S3Picker({ onSession }: Props) {
   const [cacheStats, setCacheStats] = useState<{ hits: number; misses: number } | null>(null)
   // keep a ref so fetchFiles closure can read the latest range without re-creating the function
   const autoSelectRangeRef = useRef(autoSelectRange)
+  const profileRef = useRef(profile)
+  profileRef.current = profile
+
+  useEffect(() => {
+    fetch('/api/aws/profiles')
+      .then(r => r.json())
+      .then(data => setProfiles(data.profiles ?? []))
+      .catch(() => {})
+  }, [])
 
   const handleBrowse = useCallback(async () => {
     if (!uri.trim()) return
@@ -79,7 +90,8 @@ export default function S3Picker({ onSession }: Props) {
     setLoadError('')
     setBrowsing(true)
     try {
-      const resp = await fetch(`/api/s3/dates?uri=${encodeURIComponent(uri.trim())}`)
+      const params = new URLSearchParams({ uri: uri.trim(), profile })
+      const resp = await fetch(`/api/s3/dates?${params}`)
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.error ?? resp.statusText)
       setDateInfo(data)
@@ -90,7 +102,7 @@ export default function S3Picker({ onSession }: Props) {
       setBrowseError(err instanceof Error ? err.message : String(err))
     }
     setBrowsing(false)
-  }, [uri]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [uri, profile]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchFiles = useCallback(async (info: DateInfo, date: string) => {
     setLoadingFiles(true)
@@ -98,7 +110,7 @@ export default function S3Picker({ onSession }: Props) {
     setCheckedKeys(new Set())
     setLoadError('')
     try {
-      const params = new URLSearchParams({ bucket: info.bucket, prefix: info.prefix, date, mode: info.mode })
+      const params = new URLSearchParams({ bucket: info.bucket, prefix: info.prefix, date, mode: info.mode, profile: profileRef.current })
       const resp = await fetch(`/api/s3/files?${params}`)
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.error ?? resp.statusText)
@@ -142,7 +154,7 @@ export default function S3Picker({ onSession }: Props) {
       const resp = await fetch('/api/sessions/s3', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bucket: dateInfo.bucket, keys: selectedFiles.map(f => f.key) }),
+        body: JSON.stringify({ bucket: dateInfo.bucket, keys: selectedFiles.map(f => f.key), profile }),
       })
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.error ?? resp.statusText)
@@ -153,7 +165,7 @@ export default function S3Picker({ onSession }: Props) {
     }
     setProgress('')
     setLoading(false)
-  }, [dateInfo, selectedFiles, onSession])
+  }, [dateInfo, selectedFiles, onSession, profile])
 
   const allChecked = files.length > 0 && checkedKeys.size === files.length
   const someChecked = checkedKeys.size > 0 && checkedKeys.size < files.length
@@ -172,6 +184,16 @@ export default function S3Picker({ onSession }: Props) {
             placeholder="s3://my-bucket/AWSLogs/…/CloudFront/…/DistributionId/"
             className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-300 font-mono"
           />
+          <select
+            value={profile}
+            onChange={e => setProfile(e.target.value)}
+            title="AWS profile from ~/.aws/credentials"
+            className="border border-gray-300 rounded-lg px-2 py-2 text-sm bg-white focus:outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-300"
+          >
+            {(profiles.length > 0 ? profiles : ['default']).map(p => (
+              <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
           <button
             onClick={handleBrowse}
             disabled={browsing || !uri.trim()}
@@ -182,7 +204,7 @@ export default function S3Picker({ onSession }: Props) {
         </div>
         {browseError && <p className="mt-1.5 text-xs text-red-600">{browseError}</p>}
           <p className="mt-1 text-xs text-gray-400">
-          Credentials from <code className="bg-gray-100 px-1 rounded">~/.aws</code> · region: ap-southeast-1
+          Credentials from <code className="bg-gray-100 px-1 rounded">~/.aws</code> profile <code className="bg-gray-100 px-1 rounded">{profile}</code>
         </p>
       </div>
 

@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { TIME_RANGE_OPTIONS } from '../lib/metrics'
 import type { TimeRange } from '../lib/metrics'
 import type { WafSessionData } from './types'
@@ -50,6 +50,8 @@ function formatSize(bytes: number): string {
 
 export default function WafS3Picker({ onSession }: Props) {
   const [uri, setUri] = useState('')
+  const [profiles, setProfiles] = useState<string[]>([])
+  const [profile, setProfile] = useState('default')
   const [browseError, setBrowseError] = useState('')
   const [browsing, setBrowsing] = useState(false)
   const [dateInfo, setDateInfo] = useState<DateInfo | null>(null)
@@ -69,6 +71,15 @@ export default function WafS3Picker({ onSession }: Props) {
   const [loadError, setLoadError] = useState('')
   const [cacheStats, setCacheStats] = useState<{ hits: number; misses: number } | null>(null)
   const autoSelectRangeRef = useRef(autoSelectRange)
+  const profileRef = useRef(profile)
+  profileRef.current = profile
+
+  useEffect(() => {
+    fetch('/api/aws/profiles')
+      .then(r => r.json())
+      .then(data => setProfiles(data.profiles ?? []))
+      .catch(() => {})
+  }, [])
 
   // ── File fetching ─────────────────────────────────────────────────────────────
 
@@ -84,7 +95,7 @@ export default function WafS3Picker({ onSession }: Props) {
 
       if (hoursToLoad.size === 0) {
         // No hour subfolders — list everything under the date prefix
-        const params = new URLSearchParams({ bucket: info.bucket, prefix: info.prefix, date, mode: info.mode })
+        const params = new URLSearchParams({ bucket: info.bucket, prefix: info.prefix, date, mode: info.mode, profile: profileRef.current })
         const resp = await fetch(`/api/s3/files?${params}`)
         const data = await resp.json()
         if (!resp.ok) throw new Error(data.error ?? resp.statusText)
@@ -93,7 +104,7 @@ export default function WafS3Picker({ onSession }: Props) {
         // One call per checked hour, merge + deduplicate by key
         const byKey = new Map<string, FileObject>()
         for (const hour of Array.from(hoursToLoad).sort()) {
-          const params = new URLSearchParams({ bucket: info.bucket, prefix: info.prefix, date, mode: info.mode, hour })
+          const params = new URLSearchParams({ bucket: info.bucket, prefix: info.prefix, date, mode: info.mode, hour, profile: profileRef.current })
           const resp = await fetch(`/api/s3/files?${params}`)
           const data = await resp.json()
           if (resp.ok) {
@@ -122,7 +133,7 @@ export default function WafS3Picker({ onSession }: Props) {
     setFiles([])
     setCheckedKeys(new Set())
     try {
-      const params = new URLSearchParams({ bucket: info.bucket, prefix: info.prefix, date })
+      const params = new URLSearchParams({ bucket: info.bucket, prefix: info.prefix, date, profile: profileRef.current })
       const resp = await fetch(`/api/s3/hours?${params}`)
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.error ?? resp.statusText)
@@ -156,7 +167,8 @@ export default function WafS3Picker({ onSession }: Props) {
     setLoadError('')
     setBrowsing(true)
     try {
-      const resp = await fetch(`/api/s3/dates?uri=${encodeURIComponent(uri.trim())}`)
+      const params = new URLSearchParams({ uri: uri.trim(), profile })
+      const resp = await fetch(`/api/s3/dates?${params}`)
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.error ?? resp.statusText)
       setDateInfo(data)
@@ -171,7 +183,7 @@ export default function WafS3Picker({ onSession }: Props) {
       setBrowseError(err instanceof Error ? err.message : String(err))
     }
     setBrowsing(false)
-  }, [uri, loadHoursForDate, fetchFilesForHours])
+  }, [uri, profile, loadHoursForDate, fetchFilesForHours])
 
   // ── Interaction ───────────────────────────────────────────────────────────────
 
@@ -227,7 +239,7 @@ export default function WafS3Picker({ onSession }: Props) {
       const resp = await fetch('/api/waf-sessions/s3', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bucket: dateInfo.bucket, keys: selectedFiles.map(f => f.key) }),
+        body: JSON.stringify({ bucket: dateInfo.bucket, keys: selectedFiles.map(f => f.key), profile }),
       })
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.error ?? resp.statusText)
@@ -238,7 +250,7 @@ export default function WafS3Picker({ onSession }: Props) {
     }
     setProgress('')
     setLoading(false)
-  }, [dateInfo, selectedFiles, onSession])
+  }, [dateInfo, selectedFiles, onSession, profile])
 
   return (
     <div className="space-y-4">
@@ -255,6 +267,16 @@ export default function WafS3Picker({ onSession }: Props) {
             placeholder="s3://aws-waf-logs-bucket/AWSLogs/…/WAFLogs/…/"
             className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-red-400 focus:ring-1 focus:ring-red-300 font-mono"
           />
+          <select
+            value={profile}
+            onChange={e => setProfile(e.target.value)}
+            title="AWS profile from ~/.aws/credentials"
+            className="border border-gray-300 rounded-lg px-2 py-2 text-sm bg-white focus:outline-none focus:border-red-400 focus:ring-1 focus:ring-red-300"
+          >
+            {(profiles.length > 0 ? profiles : ['default']).map(p => (
+              <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
           <button
             onClick={handleBrowse}
             disabled={browsing || !uri.trim()}
@@ -265,7 +287,7 @@ export default function WafS3Picker({ onSession }: Props) {
         </div>
         {browseError && <p className="mt-1.5 text-xs text-red-600">{browseError}</p>}
         <p className="mt-1 text-xs text-gray-400">
-          Credentials from <code className="bg-gray-100 px-1 rounded">~/.aws</code> · region: ap-southeast-1
+          Credentials from <code className="bg-gray-100 px-1 rounded">~/.aws</code> profile <code className="bg-gray-100 px-1 rounded">{profile}</code>
         </p>
       </div>
 
