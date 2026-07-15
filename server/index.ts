@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { homedir } from 'os'
 import { randomUUID } from 'crypto'
-import { parseUserAgent } from '../src/lib/userAgent'
+import { parseUserAgent, decodeUserAgent } from '../src/lib/userAgent'
 import type { ActiveFilter, MetricEntry, Metrics, TimeSeriesPoint, SessionData, QueryResult } from '../src/types'
 import type { WafMetrics, WafSessionData, WafQueryResult, WafLogRow, WafRowsResult } from '../src/waf/types'
 import type { CfLogRow, RowsResult } from '../src/types'
@@ -186,6 +186,8 @@ function computeFromFilePaths(
   const tReferer = new Map<string, number>()
   const tHost = new Map<string, number>()
   const tPath = new Map<string, number>()
+  const tQuery = new Map<string, number>()
+  const tFullPath = new Map<string, number>()
   const tStatus = new Map<string, number>()
   const tCache = new Map<string, number>()
   const tProtocol = new Map<string, number>()
@@ -193,8 +195,10 @@ function computeFromFilePaths(
   const tASN = new Map<string, number>()
   const tBrowser = new Map<string, number>()
   const tOS = new Map<string, number>()
+  const tDevice = new Map<string, number>()
   const tSSL = new Map<string, number>()
   const tIP = new Map<string, number>()
+  const tUA = new Map<string, number>()
 
   // FILTERED accumulators
   let fCount = 0, fBytes = 0
@@ -203,6 +207,8 @@ function computeFromFilePaths(
   const fReferer = new Map<string, number>()
   const fHost = new Map<string, number>()
   const fPath = new Map<string, number>()
+  const fQuery = new Map<string, number>()
+  const fFullPath = new Map<string, number>()
   const fStatus = new Map<string, number>()
   const fCache = new Map<string, number>()
   const fProtocol = new Map<string, number>()
@@ -210,8 +216,10 @@ function computeFromFilePaths(
   const fASN = new Map<string, number>()
   const fBrowser = new Map<string, number>()
   const fOS = new Map<string, number>()
+  const fDevice = new Map<string, number>()
   const fSSL = new Map<string, number>()
   const fIP = new Map<string, number>()
+  const fUA = new Map<string, number>()
 
   // Time series
   const timeBuckets = new Map<number, Map<string, number>>()
@@ -246,12 +254,17 @@ function computeFromFilePaths(
       const refHost  = getRefererHost(get('cs(Referer)'))
       const host     = get('cs(Host)') || 'Unknown'
       const path     = get('cs-uri-stem') || '/'
+      const rawQuery = get('cs-uri-query')
+      const queryParams = (rawQuery && rawQuery !== '-') ? rawQuery : 'None'
+      const fullPath = queryParams !== 'None' ? `${path}?${queryParams}` : path
       const status   = get('sc-status') || 'Unknown'
       const cache    = get('x-edge-result-type') || 'Unknown'
       const protocol = get('cs-protocol-version') || 'Unknown'
       const dc       = get('x-edge-location') || 'Unknown'
       const asn      = get('asn') || 'Unknown'
-      const ua       = parseUserAgent(get('cs(User-Agent)'))
+      const uaStr    = get('cs(User-Agent)')
+      const ua       = parseUserAgent(uaStr)
+      const decodedUA= decodeUserAgent(uaStr)
       const ssl      = get('ssl-protocol') || 'Unknown'
       const ip       = get('c-ip') || 'Unknown'
       const bytesRaw = parseInt(get('sc-bytes'), 10)
@@ -268,6 +281,8 @@ function computeFromFilePaths(
       inc(tReferer,  refHost)
       inc(tHost,     host)
       inc(tPath,     path)
+      inc(tQuery,    queryParams)
+      inc(tFullPath, fullPath)
       inc(tStatus,   status)
       inc(tCache,    cache)
       inc(tProtocol, protocol)
@@ -275,8 +290,10 @@ function computeFromFilePaths(
       inc(tASN,      asn)
       inc(tBrowser,  ua.browser)
       inc(tOS,       ua.os)
+      inc(tDevice,   ua.device)
       inc(tSSL,      ssl)
       inc(tIP,       ip)
+      inc(tUA,       decodedUA)
 
       // Filter check
       let passes = true
@@ -285,6 +302,9 @@ function computeFromFilePaths(
         if      (f.field === 'referer-host') val = refHost
         else if (f.field === 'browser')      val = ua.browser
         else if (f.field === 'os')           val = ua.os
+        else if (f.field === 'device')       val = ua.device
+        else if (f.field === 'userAgent')    val = decodedUA
+        else if (f.field === 'full-path')    val = fullPath
         else                                 val = get(f.field) || 'Unknown'
         if (!matchesOp(val, f.type, f.value)) { passes = false; break }
       }
@@ -301,6 +321,8 @@ function computeFromFilePaths(
       inc(fReferer,  refHost)
       inc(fHost,     host)
       inc(fPath,     path)
+      inc(fQuery,    queryParams)
+      inc(fFullPath, fullPath)
       inc(fStatus,   status)
       inc(fCache,    cache)
       inc(fProtocol, protocol)
@@ -308,8 +330,10 @@ function computeFromFilePaths(
       inc(fASN,      asn)
       inc(fBrowser,  ua.browser)
       inc(fOS,       ua.os)
+      inc(fDevice,   ua.device)
       inc(fSSL,      ssl)
       inc(fIP,       ip)
+      inc(fUA,       decodedUA)
 
       // Time series bucket
       const bucketTs = Math.floor(ts / bucketMs) * bucketMs
@@ -320,6 +344,9 @@ function computeFromFilePaths(
       else if (dimension === 'referer-host') dimVal = refHost
       else if (dimension === 'browser')      dimVal = ua.browser
       else if (dimension === 'os')           dimVal = ua.os
+      else if (dimension === 'device')       dimVal = ua.device
+      else if (dimension === 'userAgent')    dimVal = decodedUA
+      else if (dimension === 'full-path')    dimVal = fullPath
       else                                   dimVal = get(dimension) || 'Unknown'
       inc(bucket, dimVal)
     }
@@ -352,6 +379,8 @@ function computeFromFilePaths(
     byRefererHost:mapToEntries(tReferer,  tCount),
     byHost:       mapToEntries(tHost,     tCount),
     byPath:       mapToEntries(tPath,     tCount),
+    byQueryParams:mapToEntries(tQuery,    tCount),
+    byFullPath:   mapToEntries(tFullPath, tCount),
     byStatus:     mapToEntries(tStatus,   tCount),
     byCache:      mapToEntries(tCache,    tCount),
     byProtocol:   mapToEntries(tProtocol, tCount),
@@ -359,8 +388,10 @@ function computeFromFilePaths(
     byAsn:        mapToEntries(tASN,      tCount),
     byBrowser:    mapToEntries(tBrowser,  tCount),
     byOS:         mapToEntries(tOS,       tCount),
+    byDevice:     mapToEntries(tDevice,   tCount),
     bySslProtocol:mapToEntries(tSSL,      tCount),
     byIp:         mapToEntries(tIP,       tCount),
+    byUserAgent:  mapToEntries(tUA,       tCount),
   }
 
   const filteredMetrics: Metrics = {
@@ -370,6 +401,8 @@ function computeFromFilePaths(
     byRefererHost:mapToEntries(fReferer,  fCount),
     byHost:       mapToEntries(fHost,     fCount),
     byPath:       mapToEntries(fPath,     fCount),
+    byQueryParams:mapToEntries(fQuery,    fCount),
+    byFullPath:   mapToEntries(fFullPath, fCount),
     byStatus:     mapToEntries(fStatus,   fCount),
     byCache:      mapToEntries(fCache,    fCount),
     byProtocol:   mapToEntries(fProtocol, fCount),
@@ -377,8 +410,10 @@ function computeFromFilePaths(
     byAsn:        mapToEntries(fASN,      fCount),
     byBrowser:    mapToEntries(fBrowser,  fCount),
     byOS:         mapToEntries(fOS,       fCount),
+    byDevice:     mapToEntries(fDevice,   fCount),
     bySslProtocol:mapToEntries(fSSL,      fCount),
     byIp:         mapToEntries(fIP,       fCount),
+    byUserAgent:  mapToEntries(fUA,       fCount),
   }
 
   return {
@@ -1152,11 +1187,16 @@ function fetchCfRows(
       const refHost   = getRefererHost(get('cs(Referer)'))
       const host      = get('cs(Host)') || 'Unknown'
       const path      = get('cs-uri-stem') || '/'
+      const rawQuery  = get('cs-uri-query')
+      const queryParams = (rawQuery && rawQuery !== '-') ? rawQuery : 'None'
+      const fullPath  = queryParams !== 'None' ? `${path}?${queryParams}` : path
       const status    = get('sc-status') || 'Unknown'
       const cache     = get('x-edge-result-type') || 'Unknown'
       const protocol  = get('cs-protocol-version') || 'Unknown'
       const dc        = get('x-edge-location') || 'Unknown'
-      const ua        = parseUserAgent(get('cs(User-Agent)'))
+      const uaStr     = get('cs(User-Agent)')
+      const ua        = parseUserAgent(uaStr)
+      const decodedUA = decodeUserAgent(uaStr)
       const ip        = get('c-ip') || 'Unknown'
       const method    = get('cs-method') || 'Unknown'
       const bytesRaw  = parseInt(get('sc-bytes'), 10)
@@ -1168,6 +1208,9 @@ function fetchCfRows(
         if      (f.field === 'referer-host') val = refHost
         else if (f.field === 'browser')      val = ua.browser
         else if (f.field === 'os')           val = ua.os
+        else if (f.field === 'device')       val = ua.device
+        else if (f.field === 'userAgent')    val = decodedUA
+        else if (f.field === 'full-path')    val = fullPath
         else                                 val = get(f.field) || 'Unknown'
         if (!matchesOp(val, f.type, f.value)) { passes = false; break }
       }
@@ -1175,8 +1218,9 @@ function fetchCfRows(
 
       if (allRows.length < CF_ROW_CAP) {
         allRows.push({ ts, timestamp: `${date} ${time}`, ip, country, method, host, path,
+          queryParams, fullPath,
           status, bytes, cacheStatus: cache, refererHost: refHost,
-          browser: ua.browser, os: ua.os, dataCenter: dc, protocol })
+          browser: ua.browser, os: ua.os, device: ua.device, dataCenter: dc, protocol, userAgent: decodedUA })
       }
     }
   }

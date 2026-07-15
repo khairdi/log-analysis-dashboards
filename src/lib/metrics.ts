@@ -1,6 +1,6 @@
 import type { LogRow, TimeSeriesPoint, MetricEntry, ActiveFilter, Metrics } from '../types'
 import type { FilterOperator } from '../types'
-import { parseUserAgent } from './userAgent'
+import { parseUserAgent, decodeUserAgent } from './userAgent'
 
 export type TimeRange = '5m' | '10m' | '15m' | '30m' | '1' | '2' | '3' | '6' | '12' | 'today' | 'all'
 
@@ -70,6 +70,13 @@ function getFieldValue(row: LogRow, field: string): string {
   if (field === 'referer-host') return getRefererHost(row['cs(Referer)'])
   if (field === 'browser') return parseUserAgent(row['cs(User-Agent)']).browser
   if (field === 'os') return parseUserAgent(row['cs(User-Agent)']).os
+  if (field === 'device') return parseUserAgent(row['cs(User-Agent)']).device
+  if (field === 'userAgent') return decodeUserAgent(row['cs(User-Agent)'])
+  if (field === 'full-path') {
+    const path = row['cs-uri-stem'] || '/'
+    const query = row['cs-uri-query']
+    return (query && query !== '-') ? `${path}?${query}` : path
+  }
   return row[field] || 'Unknown'
 }
 
@@ -198,6 +205,8 @@ export function computeMetrics(rows: LogRow[], filters: ActiveFilter[]): Metrics
     byRefererHost: countBy(filtered, r => getRefererHost(r['cs(Referer)'])),
     byHost: countBy(filtered, r => r['cs(Host)'] || 'Unknown'),
     byPath: countBy(filtered, r => r['cs-uri-stem'] || '/'),
+    byQueryParams: countBy(filtered, r => (r['cs-uri-query'] && r['cs-uri-query'] !== '-') ? r['cs-uri-query'] : 'None'),
+    byFullPath: countBy(filtered, r => getFieldValue(r, 'full-path')),
     byStatus: countBy(filtered, r => r['sc-status'] || 'Unknown'),
     byCache: countBy(filtered, r => r['x-edge-result-type'] || 'Unknown'),
     byProtocol: countBy(filtered, r => r['cs-protocol-version'] || 'Unknown'),
@@ -205,7 +214,9 @@ export function computeMetrics(rows: LogRow[], filters: ActiveFilter[]): Metrics
     byAsn: countBy(filtered, r => r['asn'] || 'Unknown'),
     byBrowser: countBy(filtered, r => parseUserAgent(r['cs(User-Agent)']).browser),
     byOS: countBy(filtered, r => parseUserAgent(r['cs(User-Agent)']).os),
+    byDevice: countBy(filtered, r => parseUserAgent(r['cs(User-Agent)']).device),
     bySslProtocol: countBy(filtered, r => r['ssl-protocol'] || 'Unknown'),
     byIp: countBy(filtered, r => r['c-ip'] || 'Unknown'),
+    byUserAgent: countBy(filtered, r => decodeUserAgent(r['cs(User-Agent)'])),
   }
 }

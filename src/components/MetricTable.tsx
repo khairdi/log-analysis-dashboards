@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { MetricEntry, ActiveFilter, FilterOperator } from '../types'
 import { formatCount } from '../lib/formatters'
+import { exportMetricEntriesCsv } from '../lib/csv'
 import IpLink from './IpLink'
 
 interface Props {
@@ -31,10 +32,25 @@ export default function MetricTable({ title, field, fieldLabel, entries, activeF
 
   return (
     <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
-      <div className="px-4 py-3 border-b border-gray-100">
-        <span className="text-sm font-semibold text-gray-700">{title}</span>
+      <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between gap-2">
+        <div>
+          <span className="text-sm font-semibold text-gray-700">{title}</span>
+          {entries.length > 0 && (
+            <span className="ml-2 text-xs text-gray-400">{entries.length} unique</span>
+          )}
+        </div>
         {entries.length > 0 && (
-          <span className="ml-2 text-xs text-gray-400">{entries.length} unique</span>
+          <button
+            onClick={() => exportMetricEntriesCsv(title, fieldLabel, entries)}
+            title={`Export top ${Math.min(entries.length, 500)} rows as CSV`}
+            className="shrink-0 inline-flex items-center gap-1 text-xs text-gray-500 hover:text-blue-600 font-medium transition-colors"
+          >
+            <svg viewBox="0 0 16 16" className="w-3.5 h-3.5" fill="currentColor">
+              <path d="M8 1.5a.75.75 0 0 1 .75.75v6.19l1.72-1.72a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 1 1 1.06-1.06l1.72 1.72V2.25A.75.75 0 0 1 8 1.5z"/>
+              <path d="M2.5 10.75a.75.75 0 0 1 .75.75v1a1 1 0 0 0 1 1h7.5a1 1 0 0 0 1-1v-1a.75.75 0 0 1 1.5 0v1a2.5 2.5 0 0 1-2.5 2.5h-7.5a2.5 2.5 0 0 1-2.5-2.5v-1a.75.75 0 0 1 .75-.75z"/>
+            </svg>
+            CSV
+          </button>
         )}
       </div>
 

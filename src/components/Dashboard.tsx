@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import type { ActiveFilter, Metrics, TimeSeriesPoint, SessionData, QueryResult, CfLogRow, FilterOperator } from '../types'
 import { OPERATOR_SYMBOL, isPositiveOp } from '../types'
 import { formatCount, formatBytes, formatDate } from '../lib/formatters'
+import { exportMetricEntriesCsv } from '../lib/csv'
 import RequestsChart from './RequestsChart'
 import MetricTable from './MetricTable'
 import IpLink from './IpLink'
@@ -109,6 +110,8 @@ export default function Dashboard({ session, onReset }: Props) {
     { field: 'c-country',           label: 'Country' },
     { field: 'cs(Host)',             label: 'Host' },
     { field: 'cs-uri-stem',          label: 'Path' },
+    { field: 'full-path',            label: 'Full path (path + query)' },
+    { field: 'cs-uri-query',         label: 'Query params' },
     { field: 'sc-status',            label: 'Status code' },
     { field: 'referer-host',         label: 'Referer host' },
     { field: 'x-edge-result-type',   label: 'Cache status' },
@@ -117,9 +120,11 @@ export default function Dashboard({ session, onReset }: Props) {
     { field: 'asn',                  label: 'ASN' },
     { field: 'browser',              label: 'Browser' },
     { field: 'os',                   label: 'OS' },
+    { field: 'device',               label: 'Device type' },
     { field: 'ssl-protocol',         label: 'SSL protocol' },
     { field: 'c-ip',                 label: 'IP address' },
     { field: 'cs-method',            label: 'Method' },
+    { field: 'userAgent',            label: 'User agent' },
   ]
 
   const STATUS_COLORS: Record<string, string> = {
@@ -135,8 +140,9 @@ export default function Dashboard({ session, onReset }: Props) {
   const CF_COLUMNS: Column<CfLogRow>[] = [
     { key: 'timestamp', header: 'Time (UTC)',  className: 'w-44 shrink-0 pr-4', render: r => <span className="font-mono text-gray-700 text-xs">{r.timestamp}</span> },
     { key: 'ip',        header: 'Source IP',   className: 'w-36 shrink-0 pr-4', render: r => <IpLink ip={r.ip} className="text-xs" /> },
-    { key: 'host',      header: 'Host',        className: 'w-52 shrink-0 pr-4', render: r => <span className="text-gray-800 text-xs truncate block">{r.host}</span> },
+    { key: 'host',      header: 'Host',        className: 'w-48 shrink-0 pr-4', render: r => <span className="text-gray-800 text-xs truncate block">{r.host}</span> },
     { key: 'path',      header: 'Path',        className: 'flex-1 min-w-0 pr-4', render: r => <span className="font-mono text-gray-600 text-xs truncate block" title={r.path}>{r.path}</span> },
+    { key: 'userAgent', header: 'User Agent',  className: 'w-48 shrink-0 pr-4 hidden md:block', render: r => <span className="text-gray-600 text-xs truncate block" title={r.userAgent}>{r.userAgent}</span> },
     { key: 'status',    header: 'Status',      className: 'w-16 shrink-0 text-right', render: r => statusBadge(r.status) },
   ]
 
@@ -162,17 +168,29 @@ export default function Dashboard({ session, onReset }: Props) {
             <DetailField label="Method"   value={<span className="font-semibold">{r.method}</span>}       field="cs-method"     filterValue={r.method}      {...fp} />
             <DetailField label="Browser"  value={r.browser}                                               field="browser"       filterValue={r.browser}     {...fp} />
             <DetailField label="OS"       value={r.os}                                                    field="os"            filterValue={r.os}          {...fp} />
+            <DetailField label="Device"   value={r.device}                                                field="device"        filterValue={r.device}      {...fp} />
             <DetailField label="Referrer" value={r.refererHost}                                           field="referer-host"  filterValue={r.refererHost} {...fp} />
             <DetailField label="Host"     value={r.host}                                                  field="cs(Host)"      filterValue={r.host}        {...fp} />
+            <DetailField label="Query params" value={r.queryParams}                                       field="cs-uri-query"  filterValue={r.queryParams} {...fp} />
           </div>
         </div>
         <div>
           <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 pb-1.5 border-b border-gray-200">Full path</div>
           <div className="flex items-start gap-1.5 group">
-            <span className="font-mono text-xs text-gray-700 break-all">{r.path}</span>
-            <div className={`flex items-center gap-0.5 shrink-0 mt-0.5 transition-opacity ${activeFilters.find(f => f.field === 'cs-uri-stem' && f.value === r.path) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
-              <button onClick={() => handleFilter('cs-uri-stem', 'Path', r.path, 'eq')} className="h-4 w-4 rounded flex items-center justify-center text-[10px] font-bold bg-gray-100 text-gray-500 hover:bg-blue-100 hover:text-blue-700">=</button>
-              <button onClick={() => handleFilter('cs-uri-stem', 'Path', r.path, 'neq')} className="h-4 w-4 rounded flex items-center justify-center text-[10px] font-bold bg-gray-100 text-gray-500 hover:bg-red-100 hover:text-red-700">≠</button>
+            <span className="font-mono text-xs text-gray-700 break-all">{r.fullPath}</span>
+            <div className={`flex items-center gap-0.5 shrink-0 mt-0.5 transition-opacity ${activeFilters.find(f => f.field === 'full-path' && f.value === r.fullPath) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+              <button onClick={() => handleFilter('full-path', 'Full path', r.fullPath, 'eq')} className="h-4 w-4 rounded flex items-center justify-center text-[10px] font-bold bg-gray-100 text-gray-500 hover:bg-blue-100 hover:text-blue-700">=</button>
+              <button onClick={() => handleFilter('full-path', 'Full path', r.fullPath, 'neq')} className="h-4 w-4 rounded flex items-center justify-center text-[10px] font-bold bg-gray-100 text-gray-500 hover:bg-red-100 hover:text-red-700">≠</button>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 pb-1.5 border-b border-gray-200">User agent</div>
+          <div className="flex items-start gap-1.5 group">
+            <span className="text-xs text-gray-700 break-all">{r.userAgent}</span>
+            <div className={`flex items-center gap-0.5 shrink-0 mt-0.5 transition-opacity ${activeFilters.find(f => f.field === 'userAgent' && f.value === r.userAgent) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+              <button onClick={() => handleFilter('userAgent', 'User agent', r.userAgent, 'eq')} className="h-4 w-4 rounded flex items-center justify-center text-[10px] font-bold bg-gray-100 text-gray-500 hover:bg-blue-100 hover:text-blue-700">=</button>
+              <button onClick={() => handleFilter('userAgent', 'User agent', r.userAgent, 'neq')} className="h-4 w-4 rounded flex items-center justify-center text-[10px] font-bold bg-gray-100 text-gray-500 hover:bg-red-100 hover:text-red-700">≠</button>
             </div>
           </div>
         </div>
@@ -226,7 +244,7 @@ export default function Dashboard({ session, onReset }: Props) {
         </div>
       </div>
 
-      <div className="px-6 py-5 max-w-screen-xl mx-auto">
+      <div className="px-6 py-5 w-full">
 
         {/* Add filter button + panel */}
         <div className="mb-4">
@@ -321,11 +339,26 @@ export default function Dashboard({ session, onReset }: Props) {
 
         {/* Volume by country */}
         <div className="bg-white border border-gray-200 rounded-lg mb-5">
-          <div className="px-5 py-3 border-b border-gray-100">
-            <span className="text-sm font-semibold text-gray-700">Requests volume by country</span>
-            <p className="text-xs text-gray-400 mt-0.5">
-              Hover a row to include (<span className="font-bold">=</span>) or exclude (<span className="font-bold">≠</span>) that country.
-            </p>
+          <div className="px-5 py-3 border-b border-gray-100 flex items-start justify-between gap-2">
+            <div>
+              <span className="text-sm font-semibold text-gray-700">Requests volume by country</span>
+              <p className="text-xs text-gray-400 mt-0.5">
+                Hover a row to include (<span className="font-bold">=</span>) or exclude (<span className="font-bold">≠</span>) that country.
+              </p>
+            </div>
+            {filteredMetrics.byCountry.length > 0 && (
+              <button
+                onClick={() => exportMetricEntriesCsv('Country', 'Country', filteredMetrics.byCountry)}
+                title={`Export top ${Math.min(filteredMetrics.byCountry.length, 500)} rows as CSV`}
+                className="shrink-0 inline-flex items-center gap-1 text-xs text-gray-500 hover:text-blue-600 font-medium transition-colors"
+              >
+                <svg viewBox="0 0 16 16" className="w-3.5 h-3.5" fill="currentColor">
+                  <path d="M8 1.5a.75.75 0 0 1 .75.75v6.19l1.72-1.72a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 1 1 1.06-1.06l1.72 1.72V2.25A.75.75 0 0 1 8 1.5z"/>
+                  <path d="M2.5 10.75a.75.75 0 0 1 .75.75v1a1 1 0 0 0 1 1h7.5a1 1 0 0 0 1-1v-1a.75.75 0 0 1 1.5 0v1a2.5 2.5 0 0 1-2.5 2.5h-7.5a2.5 2.5 0 0 1-2.5-2.5v-1a.75.75 0 0 1 .75-.75z"/>
+                </svg>
+                CSV
+              </button>
+            )}
           </div>
           <div className="grid grid-cols-2 divide-x divide-gray-100">
             {[0, 1].map(col => (
@@ -354,6 +387,26 @@ export default function Dashboard({ session, onReset }: Props) {
           )}
         </div>
 
+        {/* Paths + User agents + Full path + Query params — half-width each, right after country */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+          {[
+            { title: 'Paths',                field: 'cs-uri-stem',           fieldLabel: 'Path',          entries: filteredMetrics.byPath },
+            { title: 'User agents',          field: 'userAgent',             fieldLabel: 'User agent',    entries: filteredMetrics.byUserAgent },
+            { title: 'Full path',            field: 'full-path',             fieldLabel: 'Full path',     entries: filteredMetrics.byFullPath },
+            { title: 'Query params',         field: 'cs-uri-query',          fieldLabel: 'Query params',  entries: filteredMetrics.byQueryParams },
+          ].map(t => (
+            <MetricTable
+              key={t.field}
+              title={t.title}
+              field={t.field}
+              fieldLabel={t.fieldLabel}
+              entries={t.entries}
+              activeFilters={activeFilters}
+              onFilter={handleFilter}
+            />
+          ))}
+        </div>
+
         {/* Requests volume by source */}
         <div className="mb-3">
           <div className="text-sm font-semibold text-gray-700 mb-1">Requests volume by source</div>
@@ -362,14 +415,14 @@ export default function Dashboard({ session, onReset }: Props) {
           </p>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
           {[
             { title: 'Referrers',            field: 'referer-host',         fieldLabel: 'Referer host',  entries: filteredMetrics.byRefererHost },
-            { title: 'Paths',                field: 'cs-uri-stem',           fieldLabel: 'Path',          entries: filteredMetrics.byPath },
             { title: 'Hosts',                field: 'cs(Host)',              fieldLabel: 'Host',          entries: filteredMetrics.byHost },
             { title: 'Edge status codes',    field: 'sc-status',             fieldLabel: 'Status code',   entries: filteredMetrics.byStatus },
             { title: 'Source browsers',      field: 'browser',               fieldLabel: 'Browser',       entries: filteredMetrics.byBrowser },
             { title: 'Operating systems',    field: 'os',                    fieldLabel: 'OS',            entries: filteredMetrics.byOS },
+            { title: 'Device types',         field: 'device',                fieldLabel: 'Device type',   entries: filteredMetrics.byDevice },
             { title: 'Cache statuses',       field: 'x-edge-result-type',    fieldLabel: 'Cache status',  entries: filteredMetrics.byCache },
             { title: 'HTTP / TLS protocols', field: 'cs-protocol-version',   fieldLabel: 'Protocol',      entries: filteredMetrics.byProtocol },
             { title: 'Data centers',         field: 'x-edge-location',       fieldLabel: 'Data center',   entries: filteredMetrics.byDataCenter },

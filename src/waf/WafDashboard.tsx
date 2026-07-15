@@ -275,7 +275,7 @@ export default function WafDashboard({ session, onReset }: Props) {
         </div>
       </div>
 
-      <div className="px-6 py-5 max-w-screen-xl mx-auto">
+      <div className="px-6 py-5 w-full">
 
         {/* Active filter chips + Add filter */}
         <div className="mb-4">
@@ -418,7 +418,7 @@ export default function WafDashboard({ session, onReset }: Props) {
           </p>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
           {[
             { title: 'Actions',              field: 'action',              fieldLabel: 'Action',        entries: filteredMetrics.byAction },
             { title: 'Countries',            field: 'country',             fieldLabel: 'Country',       entries: filteredMetrics.byCountry },

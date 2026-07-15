@@ -94,14 +94,18 @@ export interface CfLogRow {
   method: string
   host: string
   path: string
+  queryParams: string
+  fullPath: string
   status: string
   bytes: number
   cacheStatus: string
   refererHost: string
   browser: string
   os: string
+  device: string
   dataCenter: string
   protocol: string
+  userAgent: string
 }
 
 export interface RowsResult {
@@ -119,6 +123,8 @@ export interface Metrics {
   byRefererHost: MetricEntry[]
   byHost: MetricEntry[]
   byPath: MetricEntry[]
+  byQueryParams: MetricEntry[]
+  byFullPath: MetricEntry[]
   byStatus: MetricEntry[]
   byCache: MetricEntry[]
   byProtocol: MetricEntry[]
@@ -126,6 +132,8 @@ export interface Metrics {
   byAsn: MetricEntry[]
   byBrowser: MetricEntry[]
   byOS: MetricEntry[]
+  byDevice: MetricEntry[]
   bySslProtocol: MetricEntry[]
   byIp: MetricEntry[]
+  byUserAgent: MetricEntry[]
 }

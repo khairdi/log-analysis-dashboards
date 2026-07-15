@@ -1,5 +1,17 @@
-export function parseUserAgent(ua: string): { browser: string; os: string } {
-  if (!ua || ua === '-') return { browser: 'Unknown', os: 'Unknown' }
+const MOBILE_RE = /(?:phone|windows\s+phone|ipod|blackberry|(?:android|bb\d+|meego|silk|googlebot) .+? mobile|palm|windows\s+ce|opera mini|avantgo|mobilesafari|docomo|kaios)/i
+const TABLET_RE = /(?:ipad|playbook|(?:android|bb\d+|meego|silk)(?! .+? mobile))/i
+
+export function decodeUserAgent(ua: string): string {
+  if (!ua || ua === '-') return 'Unknown'
+  try {
+    return decodeURIComponent(ua)
+  } catch {
+    return ua
+  }
+}
+
+export function parseUserAgent(ua: string): { browser: string; os: string; device: string } {
+  if (!ua || ua === '-') return { browser: 'Unknown', os: 'Unknown', device: 'Unknown' }
 
   let decoded = ua
   try {
@@ -33,5 +45,7 @@ export function parseUserAgent(ua: string): { browser: string; os: string } {
   else if (/MSIE|Trident/i.test(decoded)) browser = 'IE'
   else if (/Chromium/i.test(decoded)) browser = 'Chromium'
 
-  return { browser, os }
+  const device = MOBILE_RE.test(decoded) ? 'Mobile' : TABLET_RE.test(decoded) ? 'Tablet' : 'Desktop'
+
+  return { browser, os, device }
 }
