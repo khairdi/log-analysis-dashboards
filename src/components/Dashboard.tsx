@@ -3,6 +3,7 @@ import type { ActiveFilter, Metrics, TimeSeriesPoint, SessionData, QueryResult, 
 import { OPERATOR_SYMBOL, isPositiveOp } from '../types'
 import { formatCount, formatBytes, formatDate } from '../lib/formatters'
 import { exportMetricEntriesCsv } from '../lib/csv'
+import { parseDashboardUrl, updateDashboardUrl } from '../lib/urlState'
 import RequestsChart from './RequestsChart'
 import MetricTable from './MetricTable'
 import IpLink from './IpLink'
@@ -28,10 +29,19 @@ const DIMENSIONS = [
 ]
 
 export default function Dashboard({ session, onReset }: Props) {
-  const [activeFilters, setActiveFilters] = useState<ActiveFilter[]>([])
-  const [dimension, setDimension] = useState('all')
-  const [dateRange, setDateRange] = useState<DateRange | null>(null)
+  // If the URL already points at this exact session (shared/bookmarked link), restore its view state
+  const urlState = parseDashboardUrl()
+  const restoreFromUrl = urlState.sessionId === session.sessionId
+
+  const [activeFilters, setActiveFilters] = useState<ActiveFilter[]>(restoreFromUrl ? urlState.filters : [])
+  const [dimension, setDimension] = useState(restoreFromUrl && urlState.dimension ? urlState.dimension : 'all')
+  const [dateRange, setDateRange] = useState<DateRange | null>(
+    restoreFromUrl && urlState.dateFrom && urlState.dateTo
+      ? { start: new Date(urlState.dateFrom), end: new Date(urlState.dateTo) }
+      : null
+  )
   const [showAddFilter, setShowAddFilter] = useState(false)
+  const [linkCopied, setLinkCopied] = useState(false)
 
   // Server-computed results — initialised from the session response
   const [tableMetrics, setTableMetrics] = useState<Metrics>(session.tableMetrics)
@@ -41,11 +51,14 @@ export default function Dashboard({ session, onReset }: Props) {
   const [querying, setQuerying] = useState(false)
   const [sessionError, setSessionError] = useState('')
 
-  // Skip the effect on the very first render (initial data comes from session props)
+  // Skip the effect on the very first render — unless a shared link restored non-default
+  // filters/dimension/date range, in which case the initial session props don't match yet.
   const isFirstRender = useRef(true)
 
   useEffect(() => {
-    if (isFirstRender.current) { isFirstRender.current = false; return }
+    const skippable = isFirstRender.current && activeFilters.length === 0 && dimension === 'all' && !dateRange
+    isFirstRender.current = false
+    if (skippable) return
 
     let cancelled = false
     setQuerying(true)
@@ -78,6 +91,26 @@ export default function Dashboard({ session, onReset }: Props) {
 
     return () => { cancelled = true }
   }, [session.sessionId, activeFilters, dimension, dateRange])
+
+  // Keep the URL in sync so the current filtered view can be copied/bookmarked/shared
+  useEffect(() => {
+    updateDashboardUrl({
+      sessionId: session.sessionId,
+      mode: 'cf',
+      filters: activeFilters,
+      dimension,
+      defaultDimension: 'all',
+      dateFrom: dateRange?.start.toISOString() ?? null,
+      dateTo: dateRange?.end.toISOString() ?? null,
+    })
+  }, [session.sessionId, activeFilters, dimension, dateRange])
+
+  const copyShareLink = () => {
+    navigator.clipboard.writeText(window.location.href).then(() => {
+      setLinkCopied(true)
+      setTimeout(() => setLinkCopied(false), 2000)
+    })
+  }
 
   const handleFilter = (field: string, fieldLabel: string, value: string, type: FilterOperator) => {
     setActiveFilters(prev => {
@@ -238,6 +271,17 @@ export default function Dashboard({ session, onReset }: Props) {
         </div>
         <div className="flex items-center gap-3">
           <DateRangePicker value={dateRange} dataMin={dataMin} dataMax={dataMax} onChange={setDateRange} />
+          <button
+            onClick={copyShareLink}
+            title="Copy a link to this exact filtered view"
+            className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:text-blue-600 font-medium transition-colors"
+          >
+            <svg viewBox="0 0 16 16" className="w-3.5 h-3.5" fill="currentColor">
+              <path d="M6.354 9.646a.5.5 0 0 0 .708-.708 2.5 2.5 0 0 1 0-3.535l2-2a2.5 2.5 0 1 1 3.536 3.535l-1 1a.5.5 0 1 1-.708-.707l1-1a1.5 1.5 0 0 0-2.121-2.122l-2 2a1.5 1.5 0 0 0 0 2.122.5.5 0 0 1 0 .707z"/>
+              <path d="M9.646 6.354a.5.5 0 0 0-.708.708 2.5 2.5 0 0 1 0 3.535l-2 2a2.5 2.5 0 1 1-3.536-3.535l1-1a.5.5 0 0 0-.707-.708l-1 1a3.5 3.5 0 1 0 4.95 4.95l2-2a3.5 3.5 0 0 0 0-4.95z"/>
+            </svg>
+            {linkCopied ? 'Copied!' : 'Copy link'}
+          </button>
           <button onClick={onReset} className="text-sm text-blue-600 hover:text-blue-800 font-medium">
             Load another file
           </button>

@@ -1008,6 +1008,32 @@ app.post('/api/sessions/upload',
  * POST /api/sessions/:id/query
  * Body: { dateRangeStart?, dateRangeEnd?, filters, dimension }
  */
+/**
+ * GET /api/sessions/:id
+ * Fetches base session metadata + baseline (unfiltered) metrics — used to
+ * resume a session from a shared/bookmarked URL without re-uploading files.
+ */
+app.get('/api/sessions/:id', (req, res) => {
+  const session = sessions.get(req.params.id)
+  if (!session) return res.status(404).json({ error: 'Session not found or expired.' })
+
+  session.lastAccess = Date.now()
+  const computed = computeFromFilePaths(session.filePaths, [], null, null, 'all', session.dataMin, session.dataMax)
+
+  const response: SessionData = {
+    sessionId: req.params.id,
+    fileName: session.fileName,
+    rowCount: session.rowCount,
+    dataMin: session.dataMin,
+    dataMax: session.dataMax,
+    tableMetrics: computed.tableMetrics,
+    filteredMetrics: computed.filteredMetrics,
+    points: computed.points,
+    keys: computed.keys,
+  }
+  res.json(response)
+})
+
 app.post('/api/sessions/:id/query', (req, res) => {
   const session = sessions.get(req.params.id)
   if (!session) return res.status(404).json({ error: 'Session not found or expired. Please reload your files.' })
@@ -1130,6 +1156,32 @@ app.post('/api/waf-sessions/upload',
  * POST /api/waf-sessions/:id/query
  * Body: { dateRangeStart?, dateRangeEnd?, filters, dimension }
  */
+/**
+ * GET /api/waf-sessions/:id
+ * Fetches base WAF session metadata + baseline (unfiltered) metrics — used
+ * to resume a session from a shared/bookmarked URL without re-uploading files.
+ */
+app.get('/api/waf-sessions/:id', (req, res) => {
+  const session = wafSessions.get(req.params.id)
+  if (!session) return res.status(404).json({ error: 'Session not found or expired.' })
+
+  session.lastAccess = Date.now()
+  const computed = computeWafFromFilePaths(session.filePaths, [], null, null, 'action', session.dataMin, session.dataMax)
+
+  const response: WafSessionData = {
+    sessionId: req.params.id,
+    fileName: session.fileName,
+    rowCount: session.rowCount,
+    dataMin: session.dataMin,
+    dataMax: session.dataMax,
+    tableMetrics: computed.tableMetrics,
+    filteredMetrics: computed.filteredMetrics,
+    points: computed.points,
+    keys: computed.keys,
+  }
+  res.json(response)
+})
+
 app.post('/api/waf-sessions/:id/query', (req, res) => {
   const session = wafSessions.get(req.params.id)
   if (!session) return res.status(404).json({ error: 'Session not found or expired. Please reload your files.' })
