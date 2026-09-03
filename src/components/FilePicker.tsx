@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
 import type { SessionData } from '../types'
+import { formatBytes } from '../lib/formatters'
 import S3Picker from './S3Picker'
 
 interface Props {
@@ -8,23 +9,66 @@ interface Props {
 
 type Tab = 'local' | 's3'
 
+/** Same file dropped/picked twice should only be staged once. */
+function fileKey(f: File): string {
+  return `${f.name}|${f.size}|${f.lastModified}`
+}
+
 export default function FilePicker({ onSession }: Props) {
   const [tab, setTab] = useState<Tab>('local')
+  const [files, setFiles] = useState<File[]>([])
   const [loading, setLoading] = useState(false)
+  const [progress, setProgress] = useState({ done: 0, total: 0 })
   const [error, setError] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const uploadFile = useCallback(async (file: File) => {
+  const addFiles = useCallback((list: FileList | null) => {
+    if (!list || list.length === 0) return
+    // Snapshot now — the caller resets the input's value, which empties its FileList
+    const incoming = Array.from(list)
+    setError('')
+    setFiles(prev => {
+      const seen = new Set(prev.map(fileKey))
+      return [...prev, ...incoming.filter(f => !seen.has(fileKey(f)))]
+    })
+  }, [])
+
+  const removeFile = useCallback((key: string) => {
+    setFiles(prev => prev.filter(f => fileKey(f) !== key))
+  }, [])
+
+  // Files are uploaded one at a time: the server buffers each whole body in
+  // memory, and sequential uploads give an honest progress count.
+  const analyze = useCallback(async () => {
+    if (files.length === 0) return
     setLoading(true)
     setError('')
+    setProgress({ done: 0, total: files.length })
     try {
-      const resp = await fetch('/api/sessions/upload', {
+      const uploadIds: string[] = []
+      for (const file of files) {
+        const resp = await fetch('/api/sessions/uploads', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'X-Filename': file.name,
+          },
+          body: file,
+        })
+        const data = await resp.json()
+        if (!resp.ok) throw new Error(`${file.name}: ${data.error ?? resp.statusText}`)
+        uploadIds.push(data.uploadId as string)
+        setProgress(p => ({ ...p, done: p.done + 1 }))
+      }
+
+      const fileName = files.length === 1
+        ? files[0].name
+        : `${files[0].name} + ${files.length - 1} more`
+
+      const resp = await fetch('/api/sessions/from-uploads', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/octet-stream',
-          'X-Filename': file.name,
-        },
-        body: file,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uploadIds, fileName }),
       })
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.error ?? resp.statusText)
@@ -33,18 +77,19 @@ export default function FilePicker({ onSession }: Props) {
       setError(err instanceof Error ? err.message : String(err))
     }
     setLoading(false)
-  }, [onSession])
+  }, [files, onSession])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
-    const file = e.dataTransfer.files[0]
-    if (file) uploadFile(file)
-  }, [uploadFile])
+    addFiles(e.dataTransfer.files)
+  }, [addFiles])
 
   const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (file) uploadFile(file)
-  }, [uploadFile])
+    addFiles(e.target.files)
+    e.target.value = ''  // allow re-picking the same file after a removal
+  }, [addFiles])
+
+  const totalBytes = files.reduce((sum, f) => sum + f.size, 0)
 
   return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center p-8">
@@ -54,7 +99,7 @@ export default function FilePicker({ onSession }: Props) {
             <div className="w-8 h-8 rounded-full bg-orange-500 flex items-center justify-center text-white font-bold text-xs">CF</div>
             <span className="text-2xl font-light text-gray-800 tracking-tight">CloudFront Analytics</span>
           </div>
-          <p className="text-gray-500 text-sm">Load a CloudFront access log to visualise traffic analytics</p>
+          <p className="text-gray-500 text-sm">Load CloudFront access logs to visualise traffic analytics</p>
         </div>
 
         <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
@@ -69,7 +114,7 @@ export default function FilePicker({ onSession }: Props) {
                     : 'text-gray-500 hover:text-gray-700'
                 }`}
               >
-                {t === 'local' ? 'Local file' : 'AWS S3'}
+                {t === 'local' ? 'Local files' : 'AWS S3'}
               </button>
             ))}
           </div>
@@ -78,10 +123,12 @@ export default function FilePicker({ onSession }: Props) {
             {tab === 'local' ? (
               <>
                 <div
-                  className={`border-2 border-dashed rounded-lg p-12 text-center cursor-pointer transition-all ${
+                  className={`border-2 border-dashed rounded-lg text-center transition-all ${
+                    files.length > 0 ? 'p-6' : 'p-12'
+                  } ${
                     loading
                       ? 'border-blue-300 bg-blue-50 cursor-wait'
-                      : 'border-gray-300 hover:border-blue-400 hover:bg-gray-50'
+                      : 'border-gray-300 hover:border-blue-400 hover:bg-gray-50 cursor-pointer'
                   }`}
                   onDrop={!loading ? handleDrop : undefined}
                   onDragOver={e => e.preventDefault()}
@@ -93,7 +140,11 @@ export default function FilePicker({ onSession }: Props) {
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
                       </svg>
-                      <div className="text-gray-500 text-sm">Uploading and parsing…</div>
+                      <div className="text-gray-500 text-sm">
+                        {progress.done < progress.total
+                          ? `Uploading ${progress.done + 1} of ${progress.total}…`
+                          : 'Parsing and computing metrics…'}
+                      </div>
                     </>
                   ) : (
                     <>
@@ -102,12 +153,51 @@ export default function FilePicker({ onSession }: Props) {
                           <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
                         </svg>
                       </div>
-                      <div className="text-gray-700 font-medium mb-1">Drop a log file here</div>
+                      <div className="text-gray-700 font-medium mb-1">
+                        {files.length > 0 ? 'Drop more log files here' : 'Drop log files here'}
+                      </div>
                       <div className="text-gray-400 text-sm">or click to browse</div>
-                      <div className="mt-3 text-xs text-gray-400">CloudFront W3C access log · .log / .gz</div>
+                      <div className="mt-3 text-xs text-gray-400">CloudFront W3C access logs · .log / .gz · multiple files supported</div>
                     </>
                   )}
                 </div>
+
+                {files.length > 0 && (
+                  <div className="mt-4">
+                    <div className="flex items-center justify-between mb-2 text-xs text-gray-500">
+                      <span>{files.length} file{files.length !== 1 ? 's' : ''} selected · {formatBytes(totalBytes)}</span>
+                      {!loading && (
+                        <button onClick={() => setFiles([])} className="text-gray-400 hover:text-red-600">
+                          Clear all
+                        </button>
+                      )}
+                    </div>
+                    <div className="max-h-48 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
+                      {files.map(f => (
+                        <div key={fileKey(f)} className="flex items-center gap-2 px-3 py-2 text-sm">
+                          <span className="flex-1 truncate text-gray-700" title={f.name}>{f.name}</span>
+                          <span className="text-xs text-gray-400 shrink-0">{formatBytes(f.size)}</span>
+                          {!loading && (
+                            <button
+                              onClick={() => removeFile(fileKey(f))}
+                              className="text-gray-300 hover:text-red-600 shrink-0"
+                              title="Remove"
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    <button
+                      onClick={analyze}
+                      disabled={loading}
+                      className="mt-3 w-full py-2.5 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:bg-gray-300"
+                    >
+                      {loading ? 'Loading…' : `Analyze ${files.length} file${files.length !== 1 ? 's' : ''}`}
+                    </button>
+                  </div>
+                )}
 
                 {error && (
                   <div className="mt-3 px-4 py-2.5 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">
@@ -115,7 +205,7 @@ export default function FilePicker({ onSession }: Props) {
                   </div>
                 )}
 
-                <input ref={inputRef} type="file" accept=".log,.txt,.gz" className="hidden" onChange={handleChange} />
+                <input ref={inputRef} type="file" multiple accept=".log,.txt,.gz" className="hidden" onChange={handleChange} />
               </>
             ) : (
               <S3Picker onSession={onSession} />

@@ -28,16 +28,23 @@ The backend handles all log parsing, metrics computation, and S3 access. The fro
 Both local files and S3 logs go through server-side sessions:
 
 ```
-Local file upload   → POST /api/sessions          → SessionData (metrics + session ID)
-S3 URI              → POST /api/sessions/from-s3  → SessionData
+Local file (each)   → POST /api/sessions/uploads       → { uploadId }
+Those ids combined  → POST /api/sessions/from-uploads  → SessionData (metrics + session ID)
+S3 URI              → POST /api/sessions/s3            → SessionData
 
 Filter/dim change   → POST /api/sessions/:id/query     → updated metrics + time series
 Sampled logs        → POST /api/sessions/:id/rows      → paginated CfLogRow[]
 
-WAF file upload     → POST /api/waf-sessions           → WafSessionData
+WAF local file      → POST /api/waf-sessions/uploads → { uploadId }
+                    → POST /api/waf-sessions/from-uploads → WafSessionData
 WAF filter change   → POST /api/waf-sessions/:id/query → updated metrics
 WAF sampled logs    → POST /api/waf-sessions/:id/rows  → paginated WafLogRow[]
 ```
+
+Local uploads are two-phase so several files can form one session: each file is
+POSTed on its own (raw body — lets the server sniff gzip magic bytes per file),
+then the returned UUID `uploadId`s are combined. Upload ids are validated against
+a UUID regex server-side; client-supplied paths are never accepted.
 
 Sessions expire after 1 hour of inactivity. S3 files are disk-cached at `~/.cloudfront-dashboard-cache/` (overridable via `CACHE_DIR` env var).
 

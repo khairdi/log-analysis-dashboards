@@ -224,13 +224,13 @@ function computeFromFilePaths(
   // Time series
   const timeBuckets = new Map<number, Map<string, number>>()
 
-  const cfState = newCfLineState()
-
   for (const filePath of filePaths) {
     if (!existsSync(filePath)) {
       console.warn(`[warn] cache file not found: ${filePath}`)
       continue
     }
+    // Each file carries its own #Fields: header (or is JSON) — state must not leak across files
+    const cfState = newCfLineState()
     // Read one file at a time — previous file's string is GC-eligible after this loop
     const content = readFileSync(filePath, 'utf-8')
     const lines = content.split('\n')
@@ -685,6 +685,36 @@ app.use(cors())
 app.use(express.json())
 
 // Named profiles from ~/.aws/credentials and ~/.aws/config (section names only — never read secret values here).
+// ── Local uploads ─────────────────────────────────────────────────────────────
+// Uploading is two-phase: each file is POSTed on its own (raw body, so the gzip
+// magic bytes can be sniffed per file), then the returned ids are combined into
+// one session. Ids are opaque UUIDs — client-supplied paths are never accepted.
+
+const UPLOAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+/** Decompresses if needed, writes the file under CACHE_DIR/<dirName>, returns its upload id. */
+function saveUpload(dirName: string, buf: Buffer): string {
+  const isGzip = buf[0] === 0x1f && buf[1] === 0x8b
+  const text = isGzip ? gunzipSync(buf).toString('utf-8') : buf.toString('utf-8')
+  const uploadId = randomUUID()
+  const dir = join(CACHE_DIR, dirName)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, `${uploadId}.log`), text, 'utf-8')
+  return uploadId
+}
+
+/** Resolves upload ids to disk paths. Throws on a malformed, unknown or expired id. */
+function uploadPaths(dirName: string, uploadIds: unknown): string[] {
+  if (!Array.isArray(uploadIds) || uploadIds.length === 0) throw new Error('Missing uploadIds array')
+  return uploadIds.map(id => {
+    if (typeof id !== 'string' || !UPLOAD_ID_RE.test(id)) throw new Error(`Invalid upload id: ${String(id)}`)
+    const p = join(CACHE_DIR, dirName, `${id}.log`)
+    if (!existsSync(p)) throw new Error(`Upload not found or expired: ${id}`)
+    return p
+  })
+}
+
+// ── S3 helpers ────────────────────────────────────────────────────────────────
 function listAwsProfiles(): string[] {
   const profiles = new Set<string>(['default'])
   for (const file of [join(homedir(), '.aws', 'credentials'), join(homedir(), '.aws', 'config')]) {
@@ -952,57 +982,72 @@ app.post('/api/sessions/s3', async (req, res) => {
 })
 
 /**
- * POST /api/sessions/upload
- * Body: raw file bytes (text/plain or gzip)
- * Header: X-Filename
- *
- * Writes decompressed content to disk cache, then streams it for initial metrics.
+ * POST /api/sessions/uploads
+ * Body: raw bytes of ONE file (plain text or gzip). Header: X-Filename
+ * Returns { uploadId } — combine several with POST /api/sessions/from-uploads.
  */
-app.post('/api/sessions/upload',
+app.post('/api/sessions/uploads',
   express.raw({ type: '*/*', limit: '500mb' }),
   (req, res) => {
     try {
-      const buf = req.body as Buffer
-      const isGzip = buf[0] === 0x1f && buf[1] === 0x8b
-      const text = isGzip ? gunzipSync(buf).toString('utf-8') : buf.toString('utf-8')
-
-      const sessionId = randomUUID()
-      const uploadDir = join(CACHE_DIR, 'uploads')
-      mkdirSync(uploadDir, { recursive: true })
-      const filePath = join(uploadDir, `${sessionId}.log`)
-      writeFileSync(filePath, text, 'utf-8')
-
-      const computed = computeFromFilePaths([filePath], [], null, null, 'all', '', '')
-      if (computed.rowCount === 0)
-        return res.status(422).json({ error: 'No data rows found in file.' })
-
       const fileName = (req.headers['x-filename'] as string) || 'uploaded.log'
-      sessions.set(sessionId, {
-        filePaths: [filePath],
-        fileName,
-        rowCount: computed.rowCount,
-        dataMin: computed.dataMin,
-        dataMax: computed.dataMax,
-        lastAccess: Date.now(),
-      })
-      console.log(`[session new] ${sessionId}  rows=${computed.rowCount}  file=${fileName}`)
-
-      const response: SessionData = {
-        sessionId, fileName,
-        rowCount: computed.rowCount,
-        dataMin: computed.dataMin,
-        dataMax: computed.dataMax,
-        tableMetrics: computed.tableMetrics,
-        filteredMetrics: computed.filteredMetrics,
-        points: computed.points,
-        keys: computed.keys,
-      }
-      res.json(response)
+      const uploadId = saveUpload('uploads', req.body as Buffer)
+      console.log(`[upload] ${fileName} -> ${uploadId}`)
+      res.json({ uploadId, fileName })
     } catch (err: unknown) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
     }
   }
 )
+
+/**
+ * POST /api/sessions/from-uploads
+ * Body: { uploadIds: string[], fileName?: string }
+ * Builds one session over all uploaded files.
+ */
+app.post('/api/sessions/from-uploads', (req, res) => {
+  const { uploadIds, fileName } = req.body as { uploadIds: string[]; fileName?: string }
+
+  let filePaths: string[]
+  try {
+    filePaths = uploadPaths('uploads', uploadIds)
+  } catch (err: unknown) {
+    return res.status(400).json({ error: err instanceof Error ? err.message : String(err) })
+  }
+
+  try {
+    const computed = computeFromFilePaths(filePaths, [], null, null, 'all', '', '')
+    if (computed.rowCount === 0)
+      return res.status(422).json({ error: 'No data rows found in selected files.' })
+
+    const sessionId = randomUUID()
+    const label = fileName || `${filePaths.length} local file${filePaths.length !== 1 ? 's' : ''}`
+    sessions.set(sessionId, {
+      filePaths,
+      fileName: label,
+      rowCount: computed.rowCount,
+      dataMin: computed.dataMin,
+      dataMax: computed.dataMax,
+      lastAccess: Date.now(),
+    })
+    console.log(`[session new] ${sessionId}  rows=${computed.rowCount}  files=${filePaths.length}`)
+
+    const response: SessionData = {
+      sessionId,
+      fileName: label,
+      rowCount: computed.rowCount,
+      dataMin: computed.dataMin,
+      dataMax: computed.dataMax,
+      tableMetrics: computed.tableMetrics,
+      filteredMetrics: computed.filteredMetrics,
+      points: computed.points,
+      keys: computed.keys,
+    }
+    res.json(response)
+  } catch (err: unknown) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
 
 /**
  * POST /api/sessions/:id/query
@@ -1122,35 +1167,54 @@ app.post('/api/waf-sessions/s3', async (req, res) => {
  * Body: raw file bytes (text or gzip)
  * Header: X-Filename
  */
-app.post('/api/waf-sessions/upload',
+/**
+ * POST /api/waf-sessions/uploads
+ * Body: raw bytes of ONE file. Header: X-Filename. Returns { uploadId }.
+ */
+app.post('/api/waf-sessions/uploads',
   express.raw({ type: '*/*', limit: '500mb' }),
   (req, res) => {
     try {
-      const buf = req.body as Buffer
-      const isGzip = buf[0] === 0x1f && buf[1] === 0x8b
-      const text = isGzip ? gunzipSync(buf).toString('utf-8') : buf.toString('utf-8')
-
-      const sessionId = randomUUID()
-      const uploadDir = join(CACHE_DIR, 'waf-uploads')
-      mkdirSync(uploadDir, { recursive: true })
-      const filePath = join(uploadDir, `${sessionId}.log`)
-      writeFileSync(filePath, text, 'utf-8')
-
-      const computed = computeWafFromFilePaths([filePath], [], null, null, 'action', '', '')
-      if (computed.rowCount === 0)
-        return res.status(422).json({ error: 'No WAF log entries found in file.' })
-
       const fileName = (req.headers['x-filename'] as string) || 'uploaded.log'
-      wafSessions.set(sessionId, { filePaths: [filePath], fileName, rowCount: computed.rowCount, dataMin: computed.dataMin, dataMax: computed.dataMax, lastAccess: Date.now() })
-      console.log(`[waf session new] ${sessionId}  rows=${computed.rowCount}  file=${fileName}`)
-
-      const response: WafSessionData = { sessionId, fileName, rowCount: computed.rowCount, dataMin: computed.dataMin, dataMax: computed.dataMax, tableMetrics: computed.tableMetrics, filteredMetrics: computed.filteredMetrics, points: computed.points, keys: computed.keys }
-      res.json(response)
+      const uploadId = saveUpload('waf-uploads', req.body as Buffer)
+      console.log(`[waf upload] ${fileName} -> ${uploadId}`)
+      res.json({ uploadId, fileName })
     } catch (err: unknown) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
     }
   }
 )
+
+/**
+ * POST /api/waf-sessions/from-uploads
+ * Body: { uploadIds: string[], fileName?: string }
+ */
+app.post('/api/waf-sessions/from-uploads', (req, res) => {
+  const { uploadIds, fileName } = req.body as { uploadIds: string[]; fileName?: string }
+
+  let filePaths: string[]
+  try {
+    filePaths = uploadPaths('waf-uploads', uploadIds)
+  } catch (err: unknown) {
+    return res.status(400).json({ error: err instanceof Error ? err.message : String(err) })
+  }
+
+  try {
+    const computed = computeWafFromFilePaths(filePaths, [], null, null, 'action', '', '')
+    if (computed.rowCount === 0)
+      return res.status(422).json({ error: 'No WAF log entries found in selected files.' })
+
+    const sessionId = randomUUID()
+    const label = fileName || `${filePaths.length} local file${filePaths.length !== 1 ? 's' : ''}`
+    wafSessions.set(sessionId, { filePaths, fileName: label, rowCount: computed.rowCount, dataMin: computed.dataMin, dataMax: computed.dataMax, lastAccess: Date.now() })
+    console.log(`[waf session new] ${sessionId}  rows=${computed.rowCount}  files=${filePaths.length}`)
+
+    const response: WafSessionData = { sessionId, fileName: label, rowCount: computed.rowCount, dataMin: computed.dataMin, dataMax: computed.dataMax, tableMetrics: computed.tableMetrics, filteredMetrics: computed.filteredMetrics, points: computed.points, keys: computed.keys }
+    res.json(response)
+  } catch (err: unknown) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
 
 /**
  * POST /api/waf-sessions/:id/query
@@ -1217,11 +1281,11 @@ function fetchCfRows(
   const minTs = dateRangeStart ? dateRangeStart.getTime() : -Infinity
   const maxTs = dateRangeEnd   ? dateRangeEnd.getTime()   : Infinity
 
-  const cfState = newCfLineState()
   const allRows: CfLogRow[] = []
 
   for (const filePath of filePaths) {
     if (!existsSync(filePath)) continue
+    const cfState = newCfLineState()
     const content = readFileSync(filePath, 'utf-8')
     for (const rawLine of content.split('\n')) {
       const line = rawLine.trim()
